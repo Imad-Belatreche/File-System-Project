@@ -1,4 +1,3 @@
-# This is a simple File Manegement System written with C language.
 # File Management System
 
 This is a simple File Management System written in C language. It simulates a file system with basic functionalities such as creating files, inserting records, searching records, deleting records, defragmenting files, compacting memory, and more.
