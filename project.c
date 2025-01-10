@@ -64,6 +64,7 @@ void clear_filesystem(FileSystem *fs);
 void display_memory_state(FileSystem *fs);
 void display_metadata(FileSystem *fs);
 void generate_sample_data(FileSystem *fs, const char *filename);
+void menu(FileSystem *fs);
 
 // Initialize the file system
 FileSystem *init_filesystem(int total_blocks, int block_size)
@@ -77,20 +78,69 @@ FileSystem *init_filesystem(int total_blocks, int block_size)
     fs->file_count = 0;
 
     fs->allocation_table = (bool *)calloc(total_blocks, sizeof(bool));
+    if (!fs->allocation_table)
+    {
+        free(fs);
+        return NULL;
+    }
     fs->allocation_table[0] = true; // Reserve first block for allocation table
 
     fs->blocks = (Block *)malloc(total_blocks * sizeof(Block));
+    if (!fs->blocks)
+    {
+        free(fs->allocation_table);
+        free(fs);
+        return NULL;
+    }
     for (int i = 0; i < total_blocks; i++)
     {
         fs->blocks[i].records = (Record *)malloc(block_size * sizeof(Record));
+        if (!fs->blocks[i].records)
+        {
+            for (int j = 0; j < i; j++)
+            {
+                free(fs->blocks[j].records);
+            }
+            free(fs->blocks);
+            free(fs->allocation_table);
+            free(fs);
+            return NULL;
+        }
         fs->blocks[i].record_count = 0;
         fs->blocks[i].next_block = -1;
         strcpy(fs->blocks[i].owner_file, "");
     }
 
     fs->file_metadata = (Metadata *)malloc(MAX_FILES * sizeof(Metadata));
+    if (!fs->file_metadata)
+    {
+        for (int i = 0; i < total_blocks; i++)
+        {
+            free(fs->blocks[i].records);
+        }
+        free(fs->blocks);
+        free(fs->allocation_table);
+        free(fs);
+        return NULL;
+    }
 
     return fs;
+}
+
+// Free memory used by the filesystem
+void free_filesystem(FileSystem *fs)
+{
+    if (!fs)
+        return;
+    for (int i = 0; i < fs->total_blocks; i++)
+    {
+        free(fs->blocks[i].records);
+    }
+    free(fs->blocks);
+    free(fs->allocation_table);
+    free(fs->file_metadata);
+    free(fs);
+    printf("Filesystem resources freed.\n");
 }
 
 // Create a new file
@@ -99,11 +149,9 @@ int create_file(FileSystem *fs, const char *filename, int record_count, bool is_
     if (fs->file_count >= MAX_FILES)
         return -1;
 
-    // Calculate required blocks
     int records_per_block = fs->block_size;
     int blocks_needed = (record_count + records_per_block - 1) / records_per_block;
 
-    // Count free blocks
     int free_blocks = 0;
     for (int i = 1; i < fs->total_blocks; i++)
     {
@@ -119,7 +167,6 @@ int create_file(FileSystem *fs, const char *filename, int record_count, bool is_
         if (response == 'y' || response == 'Y')
         {
             compact_memory(fs);
-            // Recount free blocks
             free_blocks = 0;
             for (int i = 1; i < fs->total_blocks; i++)
             {
@@ -135,15 +182,14 @@ int create_file(FileSystem *fs, const char *filename, int record_count, bool is_
         }
     }
 
-    // Initialize metadata
     Metadata *meta = &fs->file_metadata[fs->file_count];
     strncpy(meta->filename, filename, MAX_FILENAME - 1);
+    meta->filename[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
     meta->block_count = blocks_needed;
     meta->record_count = record_count;
     meta->is_contiguous = is_contiguous;
     meta->is_sorted = is_sorted;
 
-    // Allocate blocks
     if (is_contiguous)
     {
         int start_block = -1;
@@ -173,7 +219,8 @@ int create_file(FileSystem *fs, const char *filename, int record_count, bool is_
         for (int i = 0; i < blocks_needed; i++)
         {
             fs->allocation_table[start_block + i] = true;
-            strcpy(fs->blocks[start_block + i].owner_file, filename);
+            strncpy(fs->blocks[start_block + i].owner_file, filename, MAX_FILENAME - 1);
+            fs->blocks[start_block + i].owner_file[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
         }
     }
     else
@@ -191,7 +238,8 @@ int create_file(FileSystem *fs, const char *filename, int record_count, bool is_
                     fs->blocks[prev_block].next_block = i;
 
                 fs->allocation_table[i] = true;
-                strcpy(fs->blocks[i].owner_file, filename);
+                strncpy(fs->blocks[i].owner_file, filename, MAX_FILENAME - 1);
+                fs->blocks[i].owner_file[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
                 prev_block = i;
                 allocated++;
             }
@@ -205,7 +253,6 @@ int create_file(FileSystem *fs, const char *filename, int record_count, bool is_
 // Insert a record into a file
 int insert_record(FileSystem *fs, const char *filename, Record record)
 {
-    // Find file metadata
     int file_index = -1;
     for (int i = 0; i < fs->file_count; i++)
     {
@@ -219,19 +266,15 @@ int insert_record(FileSystem *fs, const char *filename, Record record)
         return -1;
 
     Metadata *meta = &fs->file_metadata[file_index];
-
-    // Find block to insert
     int current_block = meta->first_block;
     while (current_block != -1)
     {
         if (fs->blocks[current_block].record_count < fs->block_size)
         {
-            // Found space in this block
             int insert_pos = fs->blocks[current_block].record_count;
 
             if (meta->is_sorted)
             {
-                // Find correct position for sorted insertion
                 for (insert_pos = 0; insert_pos < fs->blocks[current_block].record_count; insert_pos++)
                 {
                     if (fs->blocks[current_block].records[insert_pos].id > record.id)
@@ -239,8 +282,6 @@ int insert_record(FileSystem *fs, const char *filename, Record record)
                         break;
                     }
                 }
-
-                // Shift records to make space
                 for (int i = fs->blocks[current_block].record_count; i > insert_pos; i--)
                 {
                     fs->blocks[current_block].records[i] = fs->blocks[current_block].records[i - 1];
@@ -251,7 +292,6 @@ int insert_record(FileSystem *fs, const char *filename, Record record)
             fs->blocks[current_block].record_count++;
             return 0;
         }
-
         if (meta->is_contiguous)
         {
             current_block++;
@@ -263,11 +303,10 @@ int insert_record(FileSystem *fs, const char *filename, Record record)
             current_block = fs->blocks[current_block].next_block;
         }
     }
-
-    return -1; // No space found
+    return -1;
 }
 
-// Search for a record by ID
+// Search for a record
 int search_record(FileSystem *fs, const char *filename, int id, int *block_num, int *offset)
 {
     int file_index = -1;
@@ -287,44 +326,13 @@ int search_record(FileSystem *fs, const char *filename, int id, int *block_num, 
 
     while (current_block != -1)
     {
-        if (meta->is_sorted)
+        for (int i = 0; i < fs->blocks[current_block].record_count; i++)
         {
-            // Binary search within block
-            int left = 0;
-            int right = fs->blocks[current_block].record_count - 1;
-
-            while (left <= right)
+            if (!fs->blocks[current_block].records[i].is_deleted && fs->blocks[current_block].records[i].id == id)
             {
-                int mid = (left + right) / 2;
-                if (fs->blocks[current_block].records[mid].id == id &&
-                    !fs->blocks[current_block].records[mid].is_deleted)
-                {
-                    *block_num = current_block;
-                    *offset = mid;
-                    return 0;
-                }
-                if (fs->blocks[current_block].records[mid].id < id)
-                {
-                    left = mid + 1;
-                }
-                else
-                {
-                    right = mid - 1;
-                }
-            }
-        }
-        else
-        {
-            // Linear search within block
-            for (int i = 0; i < fs->blocks[current_block].record_count; i++)
-            {
-                if (fs->blocks[current_block].records[i].id == id &&
-                    !fs->blocks[current_block].records[i].is_deleted)
-                {
-                    *block_num = current_block;
-                    *offset = i;
-                    return 0;
-                }
+                *block_num = current_block;
+                *offset = i;
+                return 0;
             }
         }
 
@@ -364,7 +372,6 @@ void delete_record_physical(FileSystem *fs, const char *filename, int id)
     int block_num, offset;
     if (search_record(fs, filename, id, &block_num, &offset) == 0)
     {
-        // Shift remaining records in the block
         for (int i = offset; i < fs->blocks[block_num].record_count - 1; i++)
         {
             fs->blocks[block_num].records[i] = fs->blocks[block_num].records[i + 1];
@@ -378,7 +385,7 @@ void delete_record_physical(FileSystem *fs, const char *filename, int id)
     }
 }
 
-// Defragment a file (remove logically deleted records)
+// Defragment a file
 void defragment_file(FileSystem *fs, const char *filename)
 {
     int file_index = -1;
@@ -403,12 +410,7 @@ void defragment_file(FileSystem *fs, const char *filename)
         {
             if (!fs->blocks[current_block].records[read_pos].is_deleted)
             {
-                if (write_pos != read_pos)
-                {
-                    fs->blocks[current_block].records[write_pos] =
-                        fs->blocks[current_block].records[read_pos];
-                }
-                write_pos++;
+                fs->blocks[current_block].records[write_pos++] = fs->blocks[current_block].records[read_pos];
             }
         }
         fs->blocks[current_block].record_count = write_pos;
@@ -428,83 +430,7 @@ void defragment_file(FileSystem *fs, const char *filename)
     printf("File defragmented.\n");
 }
 
-// Rename a file
-void rename_file(FileSystem *fs, const char *old_name, const char *new_name)
-{
-    for (int i = 0; i < fs->file_count; i++)
-    {
-        if (strcmp(fs->file_metadata[i].filename, old_name) == 0)
-        {
-            strncpy(fs->file_metadata[i].filename, new_name, MAX_FILENAME - 1);
-
-            // Update owner_file in blocks
-            int current_block = fs->file_metadata[i].first_block;
-            while (current_block != -1)
-            {
-                strcpy(fs->blocks[current_block].owner_file, new_name);
-
-                if (fs->file_metadata[i].is_contiguous)
-                {
-                    current_block++;
-                    if (current_block >= fs->file_metadata[i].first_block +
-                                             fs->file_metadata[i].block_count)
-                        break;
-                }
-                else
-                {
-                    current_block = fs->blocks[current_block].next_block;
-                }
-            }
-
-            printf("File renamed successfully.\n");
-            return;
-        }
-    }
-    printf("File not found.\n");
-}
-
-// Delete a file
-void delete_file(FileSystem *fs, const char *filename)
-{
-    for (int i = 0; i < fs->file_count; i++)
-    {
-        if (strcmp(fs->file_metadata[i].filename, filename) == 0)
-        {
-            // Free blocks
-            int current_block = fs->file_metadata[i].first_block;
-            while (current_block != -1)
-            {
-                fs->allocation_table[current_block] = false;
-                strcpy(fs->blocks[current_block].owner_file, "");
-                fs->blocks[current_block].record_count = 0;
-
-                if (fs->file_metadata[i].is_contiguous)
-                {
-                    current_block++;
-                    if (current_block >= fs->file_metadata[i].first_block + fs->file_metadata[i].block_count)
-                        break;
-                }
-                else
-                {
-                    int next_block = fs->blocks[current_block].next_block;
-                    current_block = next_block;
-                }
-            }
-
-            // Remove metadata
-            for (int j = i; j < fs->file_count - 1; j++)
-            {
-                fs->file_metadata[j] = fs->file_metadata[j + 1];
-            }
-            fs->file_count--;
-            printf("File deleted successfully.\n");
-            return;
-        }
-    }
-    printf("File not found.\n");
-}
-
-// Compact the memory by reorganizing files
+// Compact the memory
 void compact_memory(FileSystem *fs)
 {
     int free_index = 1; // Start after allocation table
@@ -514,18 +440,21 @@ void compact_memory(FileSystem *fs)
         {
             if (i != free_index)
             {
-                // Move block to free_index
                 fs->blocks[free_index] = fs->blocks[i];
                 fs->allocation_table[free_index] = true;
                 fs->allocation_table[i] = false;
 
-                // Update file metadata
                 for (int j = 0; j < fs->file_count; j++)
                 {
                     Metadata *meta = &fs->file_metadata[j];
                     if (meta->first_block == i)
                     {
                         meta->first_block = free_index;
+                    }
+                    else if (meta->is_contiguous && meta->first_block < i && i < meta->first_block + meta->block_count)
+                    {
+                        // Update the block count for contiguous files
+                        meta->block_count -= (i - free_index);
                     }
                 }
             }
@@ -535,23 +464,7 @@ void compact_memory(FileSystem *fs)
     printf("Memory compacted successfully.\n");
 }
 
-// Free memory used by the filesystem
-void free_filesystem(FileSystem *fs)
-{
-    if (!fs)
-        return;
-    for (int i = 0; i < fs->total_blocks; i++)
-    {
-        free(fs->blocks[i].records);
-    }
-    free(fs->blocks);
-    free(fs->allocation_table);
-    free(fs->file_metadata);
-    free(fs);
-    printf("Filesystem resources freed.\n");
-}
-
-// Display memory state (graphical representation)
+// Display memory state
 void display_memory_state(FileSystem *fs)
 {
     for (int i = 0; i < fs->total_blocks; i++)
@@ -568,7 +481,7 @@ void display_memory_state(FileSystem *fs)
     }
 }
 
-// Display file metadata
+// Display metadata
 void display_metadata(FileSystem *fs)
 {
     printf("Filename\tBlocks\tRecords\tFirst Block\tContiguous\tSorted\n");
@@ -585,7 +498,100 @@ void display_metadata(FileSystem *fs)
     }
 }
 
-// Main menu to interact with the filesystem
+// Delete a file
+void delete_file(FileSystem *fs, const char *filename)
+{
+    int file_index = -1;
+    for (int i = 0; i < fs->file_count; i++)
+    {
+        if (strcmp(fs->file_metadata[i].filename, filename) == 0)
+        {
+            file_index = i;
+            break;
+        }
+    }
+    if (file_index == -1)
+    {
+        printf("File not found.\n");
+        return;
+    }
+
+    Metadata *meta = &fs->file_metadata[file_index];
+    int current_block = meta->first_block;
+
+    while (current_block != -1)
+    {
+        fs->allocation_table[current_block] = false;
+        fs->blocks[current_block].record_count = 0;
+        strcpy(fs->blocks[current_block].owner_file, "");
+        int next_block = fs->blocks[current_block].next_block;
+        fs->blocks[current_block].next_block = -1;
+        current_block = next_block;
+    }
+
+    for (int i = file_index; i < fs->file_count - 1; i++)
+    {
+        fs->file_metadata[i] = fs->file_metadata[i + 1];
+    }
+    fs->file_count--;
+    printf("File deleted successfully.\n");
+}
+
+// Rename a file
+void rename_file(FileSystem *fs, const char *old_name, const char *new_name)
+{
+    int file_index = -1;
+    for (int i = 0; i < fs->file_count; i++)
+    {
+        if (strcmp(fs->file_metadata[i].filename, old_name) == 0)
+        {
+            file_index = i;
+            break;
+        }
+    }
+    if (file_index == -1)
+    {
+        printf("File not found.\n");
+        return;
+    }
+
+    for (int i = 0; i < fs->file_count; i++)
+    {
+        if (strcmp(fs->file_metadata[i].filename, new_name) == 0)
+        {
+            printf("A file with the new name already exists.\n");
+            return;
+        }
+    }
+
+    strncpy(fs->file_metadata[file_index].filename, new_name, MAX_FILENAME - 1);
+    fs->file_metadata[file_index].filename[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
+    for (int i = 0; i < fs->total_blocks; i++)
+    {
+        if (strcmp(fs->blocks[i].owner_file, old_name) == 0)
+        {
+            strncpy(fs->blocks[i].owner_file, new_name, MAX_FILENAME - 1);
+            fs->blocks[i].owner_file[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
+        }
+    }
+    printf("File renamed successfully.\n");
+}
+
+// Clear the filesystem
+void clear_filesystem(FileSystem *fs)
+{
+    for (int i = 0; i < fs->total_blocks; i++)
+    {
+        fs->allocation_table[i] = false;
+        fs->blocks[i].record_count = 0;
+        fs->blocks[i].next_block = -1;
+        strcpy(fs->blocks[i].owner_file, "");
+    }
+    fs->file_count = 0;
+    printf("Filesystem cleared.\n");
+}
+
+// Menu to interact with the filesystem
 void menu(FileSystem *fs)
 {
     int choice;
@@ -596,7 +602,15 @@ void menu(FileSystem *fs)
         printf("2. Create File\n");
         printf("3. Display Memory State\n");
         printf("4. Display Metadata\n");
-        printf("5. Exit\n");
+        printf("5. Insert Record\n");
+        printf("6. Search Record\n");
+        printf("7. Delete Record\n");
+        printf("8. Defragment File\n");
+        printf("9. Compact Memory\n");
+        printf("10. Delete File\n");
+        printf("11. Rename File\n");
+        printf("12. Clear Filesystem\n");
+        printf("13. Quit\n");
         printf("Enter your choice: ");
         scanf("%d", &choice);
 
@@ -610,7 +624,14 @@ void menu(FileSystem *fs)
             if (fs)
                 free_filesystem(fs);
             fs = init_filesystem(blocks, size);
-            printf("Filesystem initialized.\n");
+            if (fs)
+            {
+                printf("Filesystem initialized.\n");
+            }
+            else
+            {
+                printf("Failed to initialize filesystem.\n");
+            }
             break;
         }
         case 2:
@@ -637,19 +658,111 @@ void menu(FileSystem *fs)
             display_metadata(fs);
             break;
         case 5:
-            printf("Exiting program...\n");
+        {
+            char filename[MAX_FILENAME];
+            Record record;
+            printf("Enter filename and record ID: ");
+            scanf("%s %d", filename, &record.id);
+            printf("Enter record data: ");
+            scanf("%s", record.data);
+            record.is_deleted = false;
+            if (insert_record(fs, filename, record) == 0)
+            {
+                printf("Record inserted successfully.\n");
+            }
+            else
+            {
+                printf("Failed to insert record.\n");
+            }
+            break;
+        }
+        case 6:
+        {
+            char filename[MAX_FILENAME];
+            int id, block_num, offset;
+            printf("Enter filename and record ID: ");
+            scanf("%s %d", filename, &id);
+            if (search_record(fs, filename, id, &block_num, &offset) == 0)
+            {
+                printf("Record found in block %d at offset %d.\n", block_num, offset);
+            }
+            else
+            {
+                printf("Record not found.\n");
+            }
+            break;
+        }
+        case 7:
+        {
+            char filename[MAX_FILENAME];
+            int id, deletion_type;
+            printf("Enter filename and record ID: ");
+            scanf("%s %d", filename, &id);
+            printf("Enter deletion type (1 for logical, 2 for physical): ");
+            scanf("%d", &deletion_type);
+            if (deletion_type == 1)
+            {
+                delete_record_logical(fs, filename, id);
+            }
+            else if (deletion_type == 2)
+            {
+                delete_record_physical(fs, filename, id);
+            }
+            else
+            {
+                printf("Invalid deletion type.\n");
+            }
+            break;
+        }
+        case 8:
+        {
+            char filename[MAX_FILENAME];
+            printf("Enter filename to defragment: ");
+            scanf("%s", filename);
+            defragment_file(fs, filename);
+            break;
+        }
+        case 9:
+            compact_memory(fs);
+            break;
+        case 10:
+        {
+            char filename[MAX_FILENAME];
+            printf("Enter filename to delete: ");
+            scanf("%s", filename);
+            delete_file(fs, filename);
+            break;
+        }
+        case 11:
+        {
+            char old_name[MAX_FILENAME], new_name[MAX_FILENAME];
+            printf("Enter old filename and new filename: ");
+            scanf("%s %s", old_name, new_name);
+            rename_file(fs, old_name, new_name);
+            break;
+        }
+        case 12:
+            clear_filesystem(fs);
+            break;
+        case 13:
+            printf("Exiting simulator...\n");
             break;
         default:
-            printf("Invalid choice.\n");
+            printf("Invalid choice. Try again.\n");
         }
-    } while (choice != 5);
-
-    free_filesystem(fs);
+    } while (choice != 13);
 }
 
 int main()
 {
-    FileSystem *fs = NULL;
+    // Initialize with default size, user can reinitialize later
+    FileSystem *fs = init_filesystem(100, 10);
+    if (!fs)
+    {
+        printf("Failed to initialize filesystem\n");
+        return 1;
+    }
     menu(fs);
+    free_filesystem(fs);
     return 0;
 }
