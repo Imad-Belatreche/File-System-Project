@@ -66,23 +66,72 @@ void display_metadata(FileSystem *fs);
 void generate_sample_data(FileSystem *fs, const char *filename);
 void menu(FileSystem *fs);
 
+// Input utility functions
+int get_int_input(const char *prompt, int min, int max);
+void get_string_input(const char *prompt, char *buffer, size_t size);
+
+// Implementations of utility functions
+int get_int_input(const char *prompt, int min, int max)
+{
+    int value;
+    while (true)
+    {
+        printf("%s", prompt);
+        if (scanf("%d", &value) == 1 && value >= min && value <= max)
+        {
+            while (getchar() != '\n')
+                ; // Clear input buffer
+            return value;
+        }
+        printf(RED "Invalid input. Please enter a number between %d and %d." RESET "\n", min, max);
+        while (getchar() != '\n')
+            ; // Clear invalid input
+    }
+}
+
+void get_string_input(const char *prompt, char *buffer, size_t size)
+{
+    printf("%s", prompt);
+    if (fgets(buffer, size, stdin))
+    {
+        size_t len = strlen(buffer);
+        if (len > 0 && buffer[len - 1] == '\n')
+            buffer[len - 1] = '\0';
+    }
+    else
+    {
+        printf(RED "Error reading input." RESET "\n");
+    }
+}
+
 // Initialize the file system
 FileSystem *init_filesystem(int total_blocks, int block_size)
 {
+    if (total_blocks <= 0 || block_size <= 0)
+    {
+        printf("Invalid block count or size\n");
+        return NULL;
+    }
+
     FileSystem *fs = (FileSystem *)malloc(sizeof(FileSystem));
     if (!fs)
+    {
+        printf("Failed to allocate filesystem\n");
         return NULL;
+    }
 
     fs->total_blocks = total_blocks;
     fs->block_size = block_size;
     fs->file_count = 0;
 
+    // Allocate and initialize allocation table
     fs->allocation_table = (bool *)calloc(total_blocks, sizeof(bool));
     if (!fs->allocation_table)
     {
         free(fs);
         return NULL;
     }
+
     fs->allocation_table[0] = true; // Reserve first block for allocation table
 
     fs->blocks = (Block *)malloc(total_blocks * sizeof(Block));
@@ -92,11 +141,14 @@ FileSystem *init_filesystem(int total_blocks, int block_size)
         free(fs);
         return NULL;
     }
+
+    // Initialize each block
     for (int i = 0; i < total_blocks; i++)
     {
         fs->blocks[i].records = (Record *)malloc(block_size * sizeof(Record));
         if (!fs->blocks[i].records)
         {
+            // Clean up previously allocated blocks
             for (int j = 0; j < i; j++)
             {
                 free(fs->blocks[j].records);
@@ -108,7 +160,7 @@ FileSystem *init_filesystem(int total_blocks, int block_size)
         }
         fs->blocks[i].record_count = 0;
         fs->blocks[i].next_block = -1;
-        strcpy(fs->blocks[i].owner_file, "");
+        fs->blocks[i].owner_file[0] = '\0'; // Initialize empty string safely
     }
 
     fs->file_metadata = (Metadata *)malloc(MAX_FILES * sizeof(Metadata));
@@ -132,13 +184,22 @@ void free_filesystem(FileSystem *fs)
 {
     if (!fs)
         return;
-    for (int i = 0; i < fs->total_blocks; i++)
+    if (fs->blocks)
     {
-        free(fs->blocks[i].records);
+        for (int i = 0; i < fs->total_blocks; i++)
+        {
+            if (fs->blocks[i].records)
+            {
+                free(fs->blocks[i].records);
+            }
+        }
+        free(fs->blocks);
     }
-    free(fs->blocks);
-    free(fs->allocation_table);
-    free(fs->file_metadata);
+
+    if (fs->allocation_table)
+        free(fs->allocation_table);
+    if (fs->file_metadata)
+        free(fs->file_metadata);
     free(fs);
     printf("Filesystem resources freed.\n");
 }
@@ -219,8 +280,21 @@ int create_file(FileSystem *fs, const char *filename, int record_count, bool is_
         for (int i = 0; i < blocks_needed; i++)
         {
             fs->allocation_table[start_block + i] = true;
-            strncpy(fs->blocks[start_block + i].owner_file, filename, MAX_FILENAME - 1);
-            fs->blocks[start_block + i].owner_file[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
+            strcpy(fs->blocks[start_block + i].owner_file, filename);
+        }
+
+        for (int i = 0; i < blocks_needed; i++)
+        {
+            fs->allocation_table[start_block + i] = true;
+            strcpy(fs->blocks[start_block + i].owner_file, filename);
+            if (i < blocks_needed - 1)
+            {
+                fs->blocks[start_block + i].next_block = start_block + i + 1;
+            }
+            else
+            {
+                fs->blocks[start_block + i].next_block = -1;
+            }
         }
     }
     else
@@ -238,8 +312,7 @@ int create_file(FileSystem *fs, const char *filename, int record_count, bool is_
                     fs->blocks[prev_block].next_block = i;
 
                 fs->allocation_table[i] = true;
-                strncpy(fs->blocks[i].owner_file, filename, MAX_FILENAME - 1);
-                fs->blocks[i].owner_file[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
+                strcpy(fs->blocks[i].owner_file, filename);
                 prev_block = i;
                 allocated++;
             }
@@ -451,11 +524,6 @@ void compact_memory(FileSystem *fs)
                     {
                         meta->first_block = free_index;
                     }
-                    else if (meta->is_contiguous && meta->first_block < i && i < meta->first_block + meta->block_count)
-                    {
-                        // Update the block count for contiguous files
-                        meta->block_count -= (i - free_index);
-                    }
                 }
             }
             free_index++;
@@ -495,6 +563,32 @@ void display_metadata(FileSystem *fs)
                meta->first_block,
                meta->is_contiguous ? "Yes" : "No",
                meta->is_sorted ? "Yes" : "No");
+    }
+}
+
+void generate_sample_data(FileSystem *fs, const char *filename)
+{
+    srand(time(NULL));
+    int file_index = -1;
+    for (int i = 0; i < fs->file_count; i++)
+    {
+        if (strcmp(fs->file_metadata[i].filename, filename) == 0)
+        {
+            file_index = i;
+            break;
+        }
+    }
+    if (file_index == -1)
+        return;
+
+    Metadata *meta = &fs->file_metadata[file_index];
+    for (int i = 0; i < meta->record_count; i++)
+    {
+        Record record;
+        record.id = i + 1;
+        sprintf(record.data, "Data_%d", i + 1);
+        record.is_deleted = false;
+        insert_record(fs, filename, record);
     }
 }
 
@@ -562,16 +656,22 @@ void rename_file(FileSystem *fs, const char *old_name, const char *new_name)
             printf("A file with the new name already exists.\n");
             return;
         }
+        if (strlen(new_name) >= MAX_FILENAME)
+        {
+            printf("New filename is too long\n");
+            return;
+        }
     }
 
     strncpy(fs->file_metadata[file_index].filename, new_name, MAX_FILENAME - 1);
-    fs->file_metadata[file_index].filename[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
+    fs->file_metadata[file_index].filename[MAX_FILENAME - 1] = '\0';
+
     for (int i = 0; i < fs->total_blocks; i++)
     {
         if (strcmp(fs->blocks[i].owner_file, old_name) == 0)
         {
             strncpy(fs->blocks[i].owner_file, new_name, MAX_FILENAME - 1);
-            fs->blocks[i].owner_file[MAX_FILENAME - 1] = '\0'; // Ensure null-termination
+            fs->blocks[i].owner_file[MAX_FILENAME - 1] = '\0';
         }
     }
     printf("File renamed successfully.\n");
@@ -594,7 +694,15 @@ void clear_filesystem(FileSystem *fs)
 // Menu to interact with the filesystem
 void menu(FileSystem *fs)
 {
+    if (!fs)
+    {
+        printf("Error: Filesystem not initialized\n");
+        return;
+    }
+
     int choice;
+    char filename[MAX_FILENAME];
+
     do
     {
         printf("\n--- File System Simulator ---\n");
@@ -610,9 +718,18 @@ void menu(FileSystem *fs)
         printf("10. Delete File\n");
         printf("11. Rename File\n");
         printf("12. Clear Filesystem\n");
-        printf("13. Quit\n");
+        printf("13. Generate Sample Data\n");
+        printf("14. Quit\n");
         printf("Enter your choice: ");
-        scanf("%d", &choice);
+
+        if (scanf("%d", &choice) != 1)
+        {
+            // Clear input buffer on invalid input
+            while (getchar() != '\n')
+                ;
+            printf("Invalid input. Please enter a number.\n");
+            continue;
+        }
 
         switch (choice)
         {
@@ -620,18 +737,18 @@ void menu(FileSystem *fs)
         {
             int blocks, size;
             printf("Enter total blocks and block size: ");
-            scanf("%d %d", &blocks, &size);
+            if (scanf("%d %d", &blocks, &size) != 2 || blocks <= 0 || size <= 0)
+            {
+                printf("Invalid input. Both values must be positive.\n");
+                while (getchar() != '\n')
+                    ; // Clear input buffer
+                break;
+            }
+
             if (fs)
                 free_filesystem(fs);
             fs = init_filesystem(blocks, size);
-            if (fs)
-            {
-                printf("Filesystem initialized.\n");
-            }
-            else
-            {
-                printf("Failed to initialize filesystem.\n");
-            }
+            printf("Filesystem initialized.\n");
             break;
         }
         case 2:
@@ -743,14 +860,23 @@ void menu(FileSystem *fs)
         }
         case 12:
             clear_filesystem(fs);
+            printf("Filesystem cleared.\n");
             break;
         case 13:
+        {
+            char filename[MAX_FILENAME];
+            printf("Enter filename for sample data: ");
+            scanf("%s", filename);
+            generate_sample_data(fs, filename);
+            break;
+        }
+        case 14:
             printf("Exiting simulator...\n");
             break;
         default:
             printf("Invalid choice. Try again.\n");
         }
-    } while (choice != 13);
+    } while (choice != 14);
 }
 
 int main()
